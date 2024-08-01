@@ -1,17 +1,15 @@
-package uwaterloo.mpcmm
+package uwaterloo.mpcmm.join
 
 import org.apache.log4j.Logger
-import org.apache.hadoop.fs._
 import org.apache.spark.{HashPartitioner, Partitioner, SparkConf, SparkContext}
 import org.rogach.scallop._
 import org.apache.spark.broadcast.Broadcast
 import org.apache.spark.rdd.RDD
-import org.apache.spark.sql.execution.joins.CartesianProductExec
 
 import scala.util.Random
 import scala.collection.{Map, immutable, mutable}
 
-class WorstCaseOptimalAlgorithmConf (args: Seq[String]) extends ScallopConf(args) {
+class WorstCaseOptimalJoinConf (args: Seq[String]) extends ScallopConf(args) {
   mainOptions = Seq(R1Path,R2Path)
   val R1Path = opt[String](descr = "R1 path", required = true)
   val R2Path = opt[String](descr = "R2 path", required = true)
@@ -19,7 +17,7 @@ class WorstCaseOptimalAlgorithmConf (args: Seq[String]) extends ScallopConf(args
   verify()
 }
 
-object WorstCaseOptimalAlgorithm {
+object WorstCaseOptimalJoin {
 
   val logger = Logger.getLogger(getClass().getName())
 
@@ -98,12 +96,50 @@ object WorstCaseOptimalAlgorithm {
       .partitionBy(partitioner).map(_._2)
   }
 
+  def findServerCountHeavyLight(heavyDegreeMap: Map[Int, Long], lightCount: Int, L: Double): mutable.Map[Int, Int] = {
+    val HeavyLightServerCount = mutable.Map[Int, Int]()
+    heavyDegreeMap.foreach(x => {
+      HeavyLightServerCount.put(x._1, math.ceil((x._2 + lightCount) / L).toInt)
+    })
+    HeavyLightServerCount
+  }
+
+  def assignPartNumToLight(sc: SparkContext, k: Int, lightDegreeMap: Map[Int, Long]): Broadcast[Map[Int, Int]] = {
+    var serverLightLoads = Vector.fill(k)(0L)
+    val lightKeyAssignment: mutable.Map[Int, Int] = mutable.Map()
+    lightDegreeMap.toSeq.sortBy(_._2).foreach(
+      row => {
+        val minLoad = serverLightLoads.min
+        val minIndex = serverLightLoads.indexOf(minLoad)
+        serverLightLoads = serverLightLoads.updated(minIndex, minLoad + row._2)
+        lightKeyAssignment.put(row._1, minIndex)
+      }
+    )
+    sc.broadcast(lightKeyAssignment)
+  }
+
+  def dupLightForServers(sc: SparkContext, loc: Int, repeats: Int,
+                         lightDegreeMap: Map[Int, Long], rddLight: RDD[(Int, Int)]): RDD[(Int, (Int, Int))] = {
+    val lightKeyAssignmentBc = assignPartNumToLight(sc, loc, lightDegreeMap)
+    rddLight.flatMap(row => {
+      val result = mutable.ListBuffer[(Int, (Int, Int))]()
+      val AVal = row._1
+      val BVal = row._2
+      val part = lightKeyAssignmentBc.value(AVal)
+      for (i <- 0 until repeats) {
+        result += ((loc * i + part, (AVal, BVal)))
+      }
+      result
+    })
+  }
+
+
   def main(argv: Array[String]) {
-    val args = new WorstCaseOptimalAlgorithmConf(argv)
+    val args = new WorstCaseOptimalJoinConf(argv)
     logger.info("R1Path: " + args.R1Path())
     logger.info("R2Path: " + args.R2Path())
 
-    val conf = new SparkConf().setAppName("WorstCaseOptimalAlgorithm")
+    val conf = new SparkConf().setAppName("WorstCaseOptimalJoin")
     val sc = new SparkContext(conf)
     val p = args.numReducers()
 
@@ -147,15 +183,8 @@ object WorstCaseOptimalAlgorithm {
       })
     })
 
-    val AHeavyCLightServerCount = mutable.Map[Int, Int]()
-    R1AHeavyDegree.foreach(x => {
-      AHeavyCLightServerCount.put(x._1, math.ceil((x._2 + R2CLightCount) / L).toInt)
-    })
-
-    val ALightCHeavyServerCount = mutable.Map[Int, Int]()
-    R2CHeavyDegree.foreach(y => {
-      ALightCHeavyServerCount.put(y._1, math.ceil((y._2 + R1ALightCount) / L).toInt)
-    })
+    val AHeavyCLightServerCount = findServerCountHeavyLight(R1AHeavyDegree, R2CLightCount, L)
+    val ALightCHeavyServerCount = findServerCountHeavyLight(R2CHeavyDegree, R1ALightCount, L)
 
     val serverUsageHeavyHeavy = AHeavyCHeavyServerCount
     var start = 0
@@ -209,55 +238,12 @@ object WorstCaseOptimalAlgorithm {
       .saveAsTextFile("result/WorstCaseJoinNotLightLightSorted.txt")
 
     val k = math.ceil(N1 / L).toInt
-    var serverALightLoads = Vector.fill(k)(0L)
-    val lightAKeyAssignment: mutable.Map[Int, Int] = mutable.Map()
-    R1ALightDegree.toSeq.sortBy(_._2).foreach(
-      row => {
-        val minLoad = serverALightLoads.min
-        val minIndex = serverALightLoads.indexOf(minLoad)
-        serverALightLoads = serverALightLoads.updated(minIndex, minLoad + row._2)
-        lightAKeyAssignment.put(row._1, minIndex)
-      }
-    )
-    val lightAKeyAssignmentBc =  sc.broadcast(lightAKeyAssignment)
-
     val l = math.ceil(N2 / L).toInt
-    var serverCLightLoads = Vector.fill(l)(0L)
-    val lightCKeyAssignment: mutable.Map[Int, Int] = mutable.Map()
-    R2CLightDegree.toSeq.sortBy(_._2).foreach(row => {
-      val minLoad = serverCLightLoads.min
-      val minIndex = serverCLightLoads.indexOf(minLoad)
-      serverCLightLoads = serverCLightLoads.updated(minIndex, minLoad + row._2)
-      lightCKeyAssignment.put(row._1, minIndex)
-    })
-    val lightCKeyAssignmentBc =  sc.broadcast(lightCKeyAssignment)
-
     logger.info("k size:" + k)
     logger.info("l size:" + l)
 
-    val R1ALightwithPartition = R1ALight.flatMap(row => {
-      val result = mutable.ListBuffer[(Int, (Int, Int))]()
-      val AVal = row._1
-      val BVal = row._2
-      val part = lightAKeyAssignmentBc.value(AVal)
-      for (i <- 0 until l) {
-        result += ((k * i + part, (AVal, BVal)))
-      }
-      result
-    })
-    R1ALightwithPartition.foreach(println)
-
-    val R2CLightwithPartition = R2CLight.flatMap(row => {
-      val result = mutable.ListBuffer[(Int, (Int, Int))]()
-      val CVal = row._1
-      val BVal = row._2
-      val part = lightCKeyAssignmentBc.value(CVal)
-      for (i <- 0 until k) {
-        result += ((l * i + part, (CVal, BVal)))
-      }
-      result
-    })
-    R2CLightwithPartition.foreach(println)
+    val R1ALightwithPartition = dupLightForServers(sc, k, l, R1ALightDegree, R1ALight)
+    val R2CLightwithPartition = dupLightForServers(sc, l, k, R2CLightDegree, R2CLight)
 
     val lightLightJoinResult = R1ALightwithPartition.join(R2CLightwithPartition)
     val lightLightJoinResultValidated = lightLightJoinResult.filter(row => row._2._1._2 == row._2._2._2)

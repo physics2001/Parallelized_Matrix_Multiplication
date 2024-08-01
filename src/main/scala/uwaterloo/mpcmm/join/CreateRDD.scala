@@ -1,4 +1,4 @@
-package uwaterloo.mpcmm
+package uwaterloo.mpcmm.join
 
 import org.apache.spark.sql.SparkSession
 
@@ -8,7 +8,7 @@ object CreateRDD {
 
     val spark:SparkSession = SparkSession.builder()
       .master("local[3]")
-      .appName("SparkByExamples.com")
+      .appName("CreateRDD")
       .getOrCreate()
 
     val R1 = spark.sparkContext.parallelize(Seq((1, 3), (1, 2), (1, 4), (1, 8), (1, 7), (1, 10), (1, 15), (1, 16), (1, 20),
@@ -28,6 +28,6 @@ object CreateRDD {
       (11, 11)
     ))
     R2.foreach(println)
-    R2.coalesce(1,true).saveAsTextFile("data/R2simple")
+    R2.coalesce(1,true).saveAsTextFile("data/R2Simple")
   }
 }

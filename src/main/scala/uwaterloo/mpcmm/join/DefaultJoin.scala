@@ -1,15 +1,10 @@
-package uwaterloo.mpcmm
+package uwaterloo.mpcmm.join
 
 import org.apache.log4j.Logger
-import org.apache.hadoop.fs._
 import org.apache.spark.SparkContext
 import org.apache.spark.SparkConf
 import org.rogach.scallop._
-import org.apache.spark.Partitioner
 import org.apache.spark.rdd.RDD
-
-import scala.util.Try
-import scala.collection.mutable
 
 class DefaultJoinConf (args: Seq[String]) extends ScallopConf(args) {
   mainOptions = Seq(R1Path,R2Path)
@@ -17,13 +12,6 @@ class DefaultJoinConf (args: Seq[String]) extends ScallopConf(args) {
   val R2Path = opt[String](descr = "R2 path", required = true)
   val numReducers = opt[Int](descr = "number of reducers", required = true)
   verify()
-}
-
-class DefaultJoinPartitioner(numberOfPartitioner: Int) extends Partitioner {
-  override def numPartitions: Int = numberOfPartitioner
-  override def getPartition(key: Any): Int = key match {
-    case a => (a.hashCode() & Integer.MAX_VALUE) % numberOfPartitioner
-  }
 }
 
 object DefaultJoin {
@@ -72,5 +60,8 @@ object DefaultJoin {
     val resultSorted = result.sortBy(r => (r._1, r._2._1, r._2._2), numPartitions = 1)
     resultSorted.saveAsTextFile("result/DefaultJoinSorted.txt")
     logger.info("resultsize: " + resultSorted.count())
+
+    resultSorted.map(row => row._2).distinct().sortBy(r => (r._1, r._2), numPartitions = 1)
+      .saveAsTextFile("result/DefaultJoinDistinct.txt")
   }
 }
