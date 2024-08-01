@@ -3,7 +3,7 @@
 This repo is a spark implementation of the worst case optimal algorithm proposed by Xiao Hu and Ke Yi in section 3.1 of 
 their paper "Parallel Algorithms for Sparse Matrix Multiplication and Join-Aggregate Queries"[[1]](#1).
 
-## Running algorithm
+## Running the algorithms
 Run via spark-submit in terminal with sample data:
 ### Default Join
 ```
