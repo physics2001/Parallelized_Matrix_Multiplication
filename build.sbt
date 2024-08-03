@@ -14,6 +14,7 @@ libraryDependencies ++= Seq(
   "org.apache.spark" %% "spark-core" % "3.5.1",
   "org.apache.spark" %% "spark-sql" % "3.5.1",
   "org.rogach" %% "scallop" % "5.1.0",
+  "org.apache.commons" % "commons-math3" % "3.6.1",
   "org.apache.hadoop" % "hadoop-common" % "3.3.6"
 )
 

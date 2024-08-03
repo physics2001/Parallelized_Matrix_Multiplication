@@ -1,38 +1,27 @@
 package uwaterloo.mpcmm.matrix
 
 import org.apache.log4j.Logger
-import org.apache.spark.{HashPartitioner, Partitioner, SparkConf, SparkContext}
-import org.rogach.scallop._
 import org.apache.spark.broadcast.Broadcast
 import org.apache.spark.rdd.RDD
+import org.apache.spark.{SparkConf, SparkContext}
+import org.rogach.scallop._
+import uwaterloo.mpcmm.utils.{RDDProcessor, Timer}
 
-import scala.util.Random
-import scala.collection.{Map, immutable, mutable}
+import scala.collection.{Map, mutable}
 
 class WorstCaseOptimalMatrixMultConf (args: Seq[String]) extends ScallopConf(args) {
   mainOptions = Seq(R1Path,R2Path)
   val R1Path = opt[String](descr = "R1 path", required = true)
   val R2Path = opt[String](descr = "R2 path", required = true)
   val numReducers = opt[Int](descr = "number of reducers", required = true)
+  val resultFolder = opt[String](descr = "folder for results", required = true)
   verify()
 }
 
 object WorstCaseOptimalMatrixMult {
 
   val logger = Logger.getLogger(getClass().getName())
-
-  def processInitialRdd(rdd: RDD[String], transpose: Boolean): RDD[(Int, (Int, Double))] = {
-    rdd.flatMap(
-      line => {
-        val pair = line.replaceAll(" ", "").substring(1, line.length - 1).split(",")
-        if (transpose) {
-          List(Tuple2(pair(1).toIntOption.getOrElse(0), (pair(0).toIntOption.getOrElse(-1), pair(2).toDoubleOption.getOrElse(-1))))
-        } else {
-          List(Tuple2(pair(0).toIntOption.getOrElse(0), (pair(1).toIntOption.getOrElse(-1), pair(2).toDoubleOption.getOrElse(-1))))
-        }
-      }
-    )
-  }
+  val timer = new Timer()
 
   def findSplitters(rdd: RDD[(Int, (Int, Double))], p: Int, N: Long): Seq[Int] = {
     val sampleSize = Math.ceil(Math.min(15 * Math.log(p) * p, N))
@@ -93,12 +82,6 @@ object WorstCaseOptimalMatrixMult {
     (rddsHeavyAssigned.reduce(_ union _), rddsLightAssigned.reduce(_ union _))
   }
 
-  def saltedPartition(rdd: RDD[(Int, (Int, Double))], partitioner: Partitioner): RDD[(Int, (Int, Double))] = {
-    val rand = new Random
-    rdd.map(row => {(rand.nextInt(partitioner.numPartitions), row)})
-      .partitionBy(partitioner).map(_._2)
-  }
-
   def findServerCountHeavyLight(heavyDegreeMap: Map[Int, Long], lightCount: Int, L: Double): mutable.Map[Int, Int] = {
     val HeavyLightServerCount = mutable.Map[Int, Int]()
     heavyDegreeMap.foreach(x => {
@@ -150,13 +133,15 @@ object WorstCaseOptimalMatrixMult {
     val R1 = sc.textFile(args.R1Path() + "/part-00000", p);
     val R2 = sc.textFile(args.R2Path() + "/part-00000", p);
 
-    val R1processed = processInitialRdd(R1, false)
-    val R2processed = processInitialRdd(R2, true)
+    val rddProcessor = new RDDProcessor(p)
 
-    val partitioner = new HashPartitioner(p)
-    val R1partitioned = saltedPartition(R1processed, partitioner)
-    val R2partitioned = saltedPartition(R2processed, partitioner)
+    val R1processed = rddProcessor.processInitialRdd(R1, false)
+    val R2processed = rddProcessor.processInitialRdd(R2, true)
 
+    val R1partitioned = rddProcessor.saltPartitions(R1processed)
+    val R2partitioned = rddProcessor.saltPartitions(R2processed)
+
+    timer.start()
     val N1 = R1partitioned.count()
     val N2 = R2partitioned.count()
     val L = math.sqrt(N1 * N2 / p)
@@ -232,18 +217,18 @@ object WorstCaseOptimalMatrixMult {
     val notLightLightJoinResult = R1Assigned.join(R2Assigned)
     val notLightLightJoinResultValidated = notLightLightJoinResult.filter(row => row._2._1._2._1 == row._2._2._2._1)
 
-    val matmulNotLightLight = notLightLightJoinResultValidated.map(
-      row => ((row._2._1._1, row._2._2._1), row._2._1._2._2 * row._2._2._2._2)
-    ).reduceByKey(_+_).map(row => (row._1._1, row._1._2, row._2))
-    logger.info("matmulLightLight size: " + matmulNotLightLight.count())
-
-    matmulNotLightLight.sortBy(r => (r._1, r._2, r._3), numPartitions = 1)
-      .saveAsTextFile("result/WorstCaseMatMultNotLightLightSorted.txt")
+//    For testing not Light Light join
+//    val matmulNotLightLight = notLightLightJoinResultValidated.map(
+//      row => ((row._2._1._1, row._2._2._1), row._2._1._2._2 * row._2._2._2._2)
+//    ).reduceByKey(_+_).map(row => (row._1._1, row._1._2, row._2))
+//    logger.info("matmulLightLight size: " + matmulNotLightLight.count())
+//    matmulNotLightLight.sortBy(r => (r._1, r._2, r._3), numPartitions = 1)
+//      .saveAsTextFile("result/WorstCaseMatMultNotLightLightSorted.txt")
 
     val k = math.ceil(N1 / L).toInt
     val l = math.ceil(N2 / L).toInt
-    logger.info("k size:" + k)
-    logger.info("l size:" + l)
+//    logger.info("k size:" + k)
+//    logger.info("l size:" + l)
 
     val R1ALightwithPartition = dupLightForServers(sc, k, l, R1ALightDegree, R1ALight)
     val R2CLightwithPartition = dupLightForServers(sc, l, k, R2CLightDegree, R2CLight)
@@ -251,22 +236,29 @@ object WorstCaseOptimalMatrixMult {
     val lightLightJoinResult = R1ALightwithPartition.join(R2CLightwithPartition)
     val lightLightJoinResultValidated = lightLightJoinResult.filter(row => row._2._1._2._1 == row._2._2._2._1)
 
-    val matmulLightLight = lightLightJoinResultValidated.map(
-        row => ((row._2._1._1, row._2._2._1), row._2._1._2._2 * row._2._2._2._2)
-      ).reduceByKey(_+_).map(row => (row._1._1, row._1._2, row._2))
-    logger.info("matmulLightLight size: " + matmulLightLight.count())
-
-    matmulLightLight.sortBy(r => (r._1, r._2, r._3), numPartitions = 1)
-      .saveAsTextFile("result/WorstCaseMatMulLightLightSorted.txt")
+//    For testing Light Light join
+//    val matmulLightLight = lightLightJoinResultValidated.map(
+//        row => ((row._2._1._1, row._2._2._1), row._2._1._2._2 * row._2._2._2._2)
+//      ).reduceByKey(_+_).map(row => (row._1._1, row._1._2, row._2))
+//    logger.info("matmulLightLight size: " + matmulLightLight.count())
+//    matmulLightLight.sortBy(r => (r._1, r._2, r._3), numPartitions = 1)
+//      .saveAsTextFile("result/WorstCaseMatMulLightLightSorted.txt")
 
     val result = lightLightJoinResultValidated.union(notLightLightJoinResultValidated).coalesce(p).map(
       row => ((row._2._1._1, row._2._2._1), row._2._1._2._2 * row._2._2._2._2)
     ).reduceByKey(_+_).map(row => (row._1._1, row._1._2, row._2))
-    result.saveAsTextFile("result/WorstCaseMatMul.txt")
+    timer.end()
 
-    val resultSorted = result.sortBy(r => (r._1, r._2, r._3), numPartitions = 1)
-    resultSorted.saveAsTextFile("result/WorstCaseMatMulSorted.txt")
-    logger.info("Total result size: " + resultSorted.count())
+    result.saveAsTextFile(args.resultFolder() + "/WorstCaseMatMul.txt")
+    logger.info("result size: " + result.count())
+    logger.info("join time in ms: " + timer.getElapsedTime())
+
+    reflect.io.File(args.resultFolder() + "/summary.txt")
+      .writeAll("result size: " + result.count() + "\n" + "join time in ms: " + timer.getElapsedTime())
+
+//    For testing result
+//    val resultSorted = result.sortBy(r => (r._1, r._2, r._3), numPartitions = 1)
+//    resultSorted.saveAsTextFile("result/WorstCaseMatMulSorted.txt")
   }
 }
 
