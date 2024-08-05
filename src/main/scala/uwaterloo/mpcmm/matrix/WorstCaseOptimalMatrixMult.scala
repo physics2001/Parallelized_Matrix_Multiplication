@@ -5,19 +5,9 @@ import org.apache.logging.log4j.core.config.Configurator
 import org.apache.spark.broadcast.Broadcast
 import org.apache.spark.rdd.RDD
 import org.apache.spark.{SparkConf, SparkContext}
-import org.rogach.scallop._
-import uwaterloo.mpcmm.utils.{RDDProcessor, Timer}
+import uwaterloo.mpcmm.utils.{AppConf, RDDProcessor, Timer}
 
 import scala.collection.{Map, immutable, mutable}
-
-class WorstCaseOptimalMatrixMultConf (args: Seq[String]) extends ScallopConf(args) {
-  mainOptions = Seq(R1Path,R2Path)
-  val R1Path = opt[String](descr = "R1 path", required = true)
-  val R2Path = opt[String](descr = "R2 path", required = true)
-  val numReducers = opt[Int](descr = "number of reducers", required = true)
-  val resultFolder = opt[String](descr = "folder for results", required = true)
-  verify()
-}
 
 object WorstCaseOptimalMatrixMult {
   val logger = LogManager.getLogger(getClass().getName())
@@ -152,12 +142,13 @@ object WorstCaseOptimalMatrixMult {
   }
 
   def main(argv: Array[String]) {
-    Configurator.setLevel("uwaterloo.mpcmm", Level.OFF)
-    Configurator.setLevel("org", Level.OFF)
+    val args = new AppConf(argv)
+    val loggingLevel = if(args.verbose()) Level.INFO else Level.OFF
+    Configurator.setLevel("uwaterloo.mpcmm", loggingLevel)
+    Configurator.setLevel("org", loggingLevel)
 
-    val args = new WorstCaseOptimalMatrixMultConf(argv)
-//    logger.info("R1Path: " + args.R1Path())
-//    logger.info("R2Path: " + args.R2Path())
+    logger.info("R1Path: " + args.R1Path())
+    logger.info("R2Path: " + args.R2Path())
 
     val conf = new SparkConf().setAppName("WorstCaseOptimalJoin")
     val sc = new SparkContext(conf)

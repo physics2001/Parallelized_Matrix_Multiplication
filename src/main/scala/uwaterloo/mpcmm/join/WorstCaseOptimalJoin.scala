@@ -3,21 +3,12 @@ package uwaterloo.mpcmm.join
 import org.apache.logging.log4j.{Level, LogManager}
 import org.apache.logging.log4j.core.config.Configurator
 import org.apache.spark.{HashPartitioner, Partitioner, SparkConf, SparkContext}
-import org.rogach.scallop._
 import org.apache.spark.broadcast.Broadcast
 import org.apache.spark.rdd.RDD
+import uwaterloo.mpcmm.utils.AppConf
 
 import scala.util.Random
 import scala.collection.{Map, immutable, mutable}
-
-class WorstCaseOptimalJoinConf (args: Seq[String]) extends ScallopConf(args) {
-  mainOptions = Seq(R1Path,R2Path)
-  val R1Path = opt[String](descr = "R1 path", required = true)
-  val R2Path = opt[String](descr = "R2 path", required = true)
-  val numReducers = opt[Int](descr = "number of reducers", required = true)
-  val resultFolder = opt[String](descr = "folder for results", required = true)
-  verify()
-}
 
 object WorstCaseOptimalJoin {
   val logger = LogManager.getLogger(getClass().getName())
@@ -148,10 +139,11 @@ object WorstCaseOptimalJoin {
 
 
   def main(argv: Array[String]) {
-    Configurator.setLevel("uwaterloo.mpcmm", Level.OFF)
-    Configurator.setLevel("org", Level.OFF)
+    val args = new AppConf(argv)
+    val loggingLevel = if(args.verbose()) Level.INFO else Level.OFF
+    Configurator.setLevel("uwaterloo.mpcmm", loggingLevel)
+    Configurator.setLevel("org", loggingLevel)
 
-    val args = new WorstCaseOptimalJoinConf(argv)
     logger.info("R1Path: " + args.R1Path())
     logger.info("R2Path: " + args.R2Path())
 

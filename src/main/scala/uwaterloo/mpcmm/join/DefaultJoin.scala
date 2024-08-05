@@ -4,17 +4,8 @@ import org.apache.logging.log4j.{Level, LogManager}
 import org.apache.logging.log4j.core.config.Configurator
 import org.apache.spark.SparkContext
 import org.apache.spark.SparkConf
-import org.rogach.scallop._
 import org.apache.spark.rdd.RDD
-
-class DefaultJoinConf (args: Seq[String]) extends ScallopConf(args) {
-  mainOptions = Seq(R1Path,R2Path)
-  val R1Path = opt[String](descr = "R1 path", required = true)
-  val R2Path = opt[String](descr = "R2 path", required = true)
-  val numReducers = opt[Int](descr = "number of reducers", required = true)
-  val resultFolder = opt[String](descr = "folder for results", required = true)
-  verify()
-}
+import uwaterloo.mpcmm.utils.AppConf
 
 object DefaultJoin {
   val logger = LogManager.getLogger(getClass().getName())
@@ -33,10 +24,11 @@ object DefaultJoin {
   }
 
   def main(argv: Array[String]) {
-    Configurator.setLevel("uwaterloo.mpcmm", Level.OFF)
-    Configurator.setLevel("org", Level.OFF)
+    val args = new AppConf(argv)
+    val loggingLevel = if(args.verbose()) Level.INFO else Level.OFF
+    Configurator.setLevel("uwaterloo.mpcmm", loggingLevel)
+    Configurator.setLevel("org", loggingLevel)
 
-    val args = new DefaultJoinConf(argv)
     logger.info("R1Path: " + args.R1Path())
     logger.info("R2Path: " + args.R2Path())
 
