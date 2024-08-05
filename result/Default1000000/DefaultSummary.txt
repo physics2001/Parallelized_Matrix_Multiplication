@@ -1,0 +1,2 @@
+result size: 8508244
+join time in ms: 26

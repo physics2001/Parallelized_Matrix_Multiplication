@@ -3,4 +3,5 @@
 project/project
 project/target
 target
-result
+result/*4000000
+result/*2000000
