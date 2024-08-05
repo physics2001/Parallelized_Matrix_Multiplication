@@ -1,6 +1,7 @@
 package uwaterloo.mpcmm.join
 
-import org.apache.log4j.Logger
+import org.apache.logging.log4j.{Level, LogManager}
+import org.apache.logging.log4j.core.config.Configurator
 import org.apache.spark.{HashPartitioner, Partitioner, SparkConf, SparkContext}
 import org.rogach.scallop._
 import org.apache.spark.broadcast.Broadcast
@@ -14,12 +15,12 @@ class WorstCaseOptimalJoinConf (args: Seq[String]) extends ScallopConf(args) {
   val R1Path = opt[String](descr = "R1 path", required = true)
   val R2Path = opt[String](descr = "R2 path", required = true)
   val numReducers = opt[Int](descr = "number of reducers", required = true)
+  val resultFolder = opt[String](descr = "folder for results", required = true)
   verify()
 }
 
 object WorstCaseOptimalJoin {
-
-  val logger = Logger.getLogger(getClass().getName())
+  val logger = LogManager.getLogger(getClass().getName())
 
   def processInitialRdd(rdd: RDD[String], transpose: Boolean): RDD[(Int, Int)] = {
     rdd.flatMap(
@@ -47,12 +48,18 @@ object WorstCaseOptimalJoin {
     rdd.filter(x => keySetBc.value.contains(x._1))
   }
 
-  def assignPartitionNumberToHeavy(rdd: RDD[(Int, Int)], assignmentMapBc: Broadcast[mutable.Map[Int, (Int, Int)]]): RDD[(Int, (Int, Int))] = {
-    rdd.map(row => {
+  def assignPartitionNumberToHeavy(rdd: RDD[(Int, Int)], assignmentMapBc: Broadcast[immutable.Map[Int, List[(Int, (Int, Int))]]]): RDD[(Int, (Int, Int))] = {
+    rdd.flatMap(row => {
+      val result = new mutable.ListBuffer[(Int, (Int, Int))]
       val keyVal = row._1
       val joinVal = row._2
-      val pair = assignmentMapBc.value(keyVal)
-      (joinVal % pair._2 + pair._1, (keyVal, joinVal))
+      val listOfServers = assignmentMapBc.value(keyVal)
+      listOfServers.foreach(
+        pair => {
+          result += ((joinVal % pair._2._2 + pair._2._1, (keyVal, joinVal)))
+        }
+      )
+      result
     })
   }
 
@@ -68,6 +75,8 @@ object WorstCaseOptimalJoin {
                                    serverAssignmentHeavyLightMap: Map[Int, (Int, Int)]): (RDD[(Int, (Int, Int))], RDD[(Int, (Int, Int))]) = {
     val rddsHeavyAssigned = new mutable.ListBuffer[RDD[(Int, (Int, Int))]]
     val rddsLightAssigned = new mutable.ListBuffer[RDD[(Int, (Int, Int))]]
+    rddsHeavyAssigned += sc.emptyRDD[(Int, (Int, Int))]
+    rddsLightAssigned += sc.emptyRDD[(Int, (Int, Int))]
 
     serverAssignmentHeavyLightMap.foreach {
       case (key, pair) =>
@@ -118,16 +127,20 @@ object WorstCaseOptimalJoin {
     sc.broadcast(lightKeyAssignment)
   }
 
-  def dupLightForServers(sc: SparkContext, loc: Int, repeats: Int,
+  def dupLightForServers(sc: SparkContext, loc: Int, repeats: Int, column: Boolean,
                          lightDegreeMap: Map[Int, Long], rddLight: RDD[(Int, Int)]): RDD[(Int, (Int, Int))] = {
     val lightKeyAssignmentBc = assignPartNumToLight(sc, loc, lightDegreeMap)
     rddLight.flatMap(row => {
       val result = mutable.ListBuffer[(Int, (Int, Int))]()
-      val AVal = row._1
-      val BVal = row._2
-      val part = lightKeyAssignmentBc.value(AVal)
+      val keyVal = row._1
+      val joinVal = row._2
+      val part = lightKeyAssignmentBc.value(keyVal)
       for (i <- 0 until repeats) {
-        result += ((loc * i + part, (AVal, BVal)))
+        if (column) {
+          result += ((loc * i + part, (keyVal, joinVal)))
+        } else {
+          result += ((repeats * part + i, (keyVal, joinVal)))
+        }
       }
       result
     })
@@ -135,6 +148,9 @@ object WorstCaseOptimalJoin {
 
 
   def main(argv: Array[String]) {
+    Configurator.setLevel("uwaterloo.mpcmm", Level.OFF)
+    Configurator.setLevel("org", Level.OFF)
+
     val args = new WorstCaseOptimalJoinConf(argv)
     logger.info("R1Path: " + args.R1Path())
     logger.info("R2Path: " + args.R2Path())
@@ -186,15 +202,20 @@ object WorstCaseOptimalJoin {
     val AHeavyCLightServerCount = findServerCountHeavyLight(R1AHeavyDegree, R2CLightCount, L)
     val ALightCHeavyServerCount = findServerCountHeavyLight(R2CHeavyDegree, R1ALightCount, L)
 
-    val serverUsageHeavyHeavy = AHeavyCHeavyServerCount
+    val serverUsageHeavyHeavy = AHeavyCHeavyServerCount.toList
     var start = 0
     val serverAssignmentHeavyHeavy = serverUsageHeavyHeavy.map(row => {
-        start += row._2
-        (row._1, (start - row._2, row._2))
-      }
+      start += row._2
+      (row._1, (start - row._2, row._2))
+    }
     )
 
     val serverAssignmentAHeavy = serverAssignmentHeavyHeavy.map(row => (row._1._1, row._2))
+    val serverAssignmentCHeavy = serverAssignmentHeavyHeavy.map(row => (row._1._2, row._2))
+
+    val serverAssignmentAHeavyMap = serverAssignmentAHeavy.groupBy(_._1)
+    val serverAssignmentCHeavyMap = serverAssignmentCHeavy.groupBy(_._1)
+
     val serverAssignmentAHeavyCLight = AHeavyCLightServerCount.map(
       row => {
         start += row._2
@@ -202,7 +223,6 @@ object WorstCaseOptimalJoin {
       }
     )
 
-    val serverAssignmentCHeavy = serverAssignmentHeavyHeavy.map(row => (row._1._2, row._2))
     val serverAssignmentALightCHeavy = ALightCHeavyServerCount.map(
       row => {
         start += row._2
@@ -210,9 +230,8 @@ object WorstCaseOptimalJoin {
       }
     )
 
-    val serverAssignmentAHeavyBc = sc.broadcast(serverAssignmentAHeavy)
-    val serverAssignmentCHeavyBc = sc.broadcast(serverAssignmentCHeavy)
-
+    val serverAssignmentAHeavyBc = sc.broadcast(serverAssignmentAHeavyMap)
+    val serverAssignmentCHeavyBc = sc.broadcast(serverAssignmentCHeavyMap)
 
     val R1AHeavyAssigned = assignPartitionNumberToHeavy(R1AHeavy, serverAssignmentAHeavyBc)
     val R2CHeavyAssigned = assignPartitionNumberToHeavy(R2CHeavy, serverAssignmentCHeavyBc)
@@ -229,41 +248,46 @@ object WorstCaseOptimalJoin {
     val notLightLightJoinResult = R1Assigned.join(R2Assigned)
     val notLightLightJoinResultValidated = notLightLightJoinResult.filter(row => row._2._1._2 == row._2._2._2)
 
-    notLightLightJoinResultValidated.saveAsTextFile("result/WorstCaseJoinNotLightLight.txt")
-    logger.info("validatedJoinResultNotLightLight size: " + notLightLightJoinResultValidated.count())
-
-    notLightLightJoinResultValidated.map(
-        row => (row._2._1._2, (row._2._1._1, row._2._2._1))
-      ).sortBy(r => (r._1, r._2._1, r._2._2), numPartitions = 1)
-      .saveAsTextFile("result/WorstCaseJoinNotLightLightSorted.txt")
+//    For testing purpose only
+//    notLightLightJoinResultValidated.saveAsTextFile(args.resultFolder() + "/WorstCaseJoinNotLightLight.txt")
+//    logger.info("validatedJoinResultNotLightLight size: " + notLightLightJoinResultValidated.count())
+//
+//    notLightLightJoinResultValidated.map(
+//        row => (row._2._1._2, (row._2._1._1, row._2._2._1))
+//      ).sortBy(r => (r._1, r._2._1, r._2._2), numPartitions = 1)
+//      .saveAsTextFile(args.resultFolder() + "/WorstCaseJoinNotLightLightSorted.txt")
 
     val k = math.ceil(N1 / L).toInt
     val l = math.ceil(N2 / L).toInt
     logger.info("k size:" + k)
     logger.info("l size:" + l)
 
-    val R1ALightwithPartition = dupLightForServers(sc, k, l, R1ALightDegree, R1ALight)
-    val R2CLightwithPartition = dupLightForServers(sc, l, k, R2CLightDegree, R2CLight)
+    val R1ALightwithPartition = dupLightForServers(sc, k, l, true, R1ALightDegree, R1ALight)
+    val R2CLightwithPartition = dupLightForServers(sc, l, k, false, R2CLightDegree, R2CLight)
 
     val lightLightJoinResult = R1ALightwithPartition.join(R2CLightwithPartition)
     val lightLightJoinResultValidated = lightLightJoinResult.filter(row => row._2._1._2 == row._2._2._2)
 
-    lightLightJoinResultValidated.saveAsTextFile("result/WorstCaseJoinLightLight.txt")
-    logger.info("validatedJoinResultLightLight size: " + lightLightJoinResultValidated.count())
+//    For testing purpose only
+//    lightLightJoinResultValidated.saveAsTextFile("result/WorstCaseJoinLightLight.txt")
+//    logger.info("validatedJoinResultLightLight size: " + lightLightJoinResultValidated.count())
 
-    lightLightJoinResultValidated.map(
-        row => (row._2._1._2, (row._2._1._1, row._2._2._1))
-      ).sortBy(r => (r._1, r._2._1, r._2._2), numPartitions = 1)
-      .saveAsTextFile("result/WorstCaseJoinLightLightSorted.txt")
+//    lightLightJoinResultValidated.map(
+//        row => (row._2._1._2, (row._2._1._1, row._2._2._1))
+//      ).sortBy(r => (r._1, r._2._1, r._2._2), numPartitions = 1)
+//      .saveAsTextFile(args.resultFolder() + "/WorstCaseJoinLightLightSorted.txt")
 
     val result = lightLightJoinResultValidated.union(notLightLightJoinResultValidated).coalesce(p).map(
       row => (row._2._1._2, (row._2._1._1, row._2._2._1))
     )
-    result.saveAsTextFile("result/WorstCaseJoin.txt")
+    result.saveAsTextFile(args.resultFolder() + "/WorstCaseJoin.txt")
+    reflect.io.File(args.resultFolder() + "/WorstCaseSummary.txt")
+      .writeAll("result size: " + result.count())
 
-    val resultSorted = result.sortBy(r => (r._1, r._2._1, r._2._2), numPartitions = 1)
-    resultSorted.saveAsTextFile("result/WorstCaseJoinSorted.txt")
-    logger.info("Total result size: " + resultSorted.count())
+//    For testing purpose only
+//    val resultSorted = result.sortBy(r => (r._1, r._2._1, r._2._2), numPartitions = 1)
+//    resultSorted.saveAsTextFile(args.resultFolder() + "/WorstCaseJoinSorted.txt")
+//    logger.info("Total result size: " + resultSorted.count())
   }
 }
 

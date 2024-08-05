@@ -1,13 +1,14 @@
 package uwaterloo.mpcmm.matrix
 
-import org.apache.log4j.Logger
+import org.apache.logging.log4j.{Level, LogManager}
+import org.apache.logging.log4j.core.config.Configurator
 import org.apache.spark.broadcast.Broadcast
 import org.apache.spark.rdd.RDD
 import org.apache.spark.{SparkConf, SparkContext}
 import org.rogach.scallop._
 import uwaterloo.mpcmm.utils.{RDDProcessor, Timer}
 
-import scala.collection.{Map, mutable}
+import scala.collection.{Map, immutable, mutable}
 
 class WorstCaseOptimalMatrixMultConf (args: Seq[String]) extends ScallopConf(args) {
   mainOptions = Seq(R1Path,R2Path)
@@ -19,8 +20,7 @@ class WorstCaseOptimalMatrixMultConf (args: Seq[String]) extends ScallopConf(arg
 }
 
 object WorstCaseOptimalMatrixMult {
-
-  val logger = Logger.getLogger(getClass().getName())
+  val logger = LogManager.getLogger(getClass().getName())
   val timer = new Timer()
 
   def findSplitters(rdd: RDD[(Int, (Int, Double))], p: Int, N: Long): Seq[Int] = {
@@ -36,13 +36,19 @@ object WorstCaseOptimalMatrixMult {
     rdd.filter(x => keySetBc.value.contains(x._1))
   }
 
-  def assignPartitionNumberToHeavy(rdd: RDD[(Int, (Int, Double))], assignmentMapBc: Broadcast[mutable.Map[Int, (Int, Int)]]): RDD[(Int, (Int, (Int, Double)))] = {
-    rdd.map(row => {
+  def assignPartitionNumberToHeavy(rdd: RDD[(Int, (Int, Double))], assignmentMapBc: Broadcast[immutable.Map[Int, List[(Int, (Int, Int))]]]): RDD[(Int, (Int, (Int, Double)))] = {
+    rdd.flatMap(row => {
+      val result = new mutable.ListBuffer[(Int, (Int, (Int, Double)))]
       val keyVal = row._1
       val joinVal = row._2._1
       val weight = row._2._2
-      val pair = assignmentMapBc.value(keyVal)
-      (joinVal % pair._2 + pair._1, (keyVal, (joinVal, weight)))
+      val listOfServers = assignmentMapBc.value(keyVal)
+      listOfServers.foreach(
+        pair => {
+          result += ((joinVal % pair._2._2 + pair._2._1, (keyVal, (joinVal, weight))))
+        }
+      )
+      result
     })
   }
 
@@ -60,6 +66,8 @@ object WorstCaseOptimalMatrixMult {
   (RDD[(Int, (Int, (Int, Double)))], RDD[(Int, (Int, (Int, Double)))]) = {
     val rddsHeavyAssigned = new mutable.ListBuffer[RDD[(Int, (Int, (Int, Double)))]]
     val rddsLightAssigned = new mutable.ListBuffer[RDD[(Int, (Int, (Int, Double)))]]
+    rddsHeavyAssigned += sc.emptyRDD[(Int, (Int, (Int, Double)))]
+    rddsLightAssigned += sc.emptyRDD[(Int, (Int, (Int, Double)))]
 
     serverAssignmentHeavyLightMap.foreach {
       case (key, pair) =>
@@ -104,7 +112,7 @@ object WorstCaseOptimalMatrixMult {
     sc.broadcast(lightKeyAssignment)
   }
 
-  def dupLightForServers(sc: SparkContext, loc: Int, repeats: Int,
+  def dupLightForServers(sc: SparkContext, loc: Int, repeats: Int, column: Boolean,
                          lightDegreeMap: Map[Int, Long], rddLight: RDD[(Int, (Int, Double))]): RDD[(Int, (Int, (Int, Double)))] = {
     val lightKeyAssignmentBc = assignPartNumToLight(sc, loc, lightDegreeMap)
     rddLight.flatMap(row => {
@@ -114,17 +122,42 @@ object WorstCaseOptimalMatrixMult {
       val weight = row._2._2
       val part = lightKeyAssignmentBc.value(keyVal)
       for (i <- 0 until repeats) {
-        result += ((loc * i + part, (keyVal, (joinVal, weight))))
+        if (column) {
+          result += ((loc * i + part, (keyVal, (joinVal, weight))))
+        } else {
+          result += ((repeats * part + i, (keyVal, (joinVal, weight))))
+        }
       }
       result
     })
   }
 
+  def dupLightForServersHashAssign(sc: SparkContext, loc: Int, repeats: Int, column: Boolean,
+                         lightDegreeMap: Map[Int, Long], rddLight: RDD[(Int, (Int, Double))]): RDD[(Int, (Int, (Int, Double)))] = {
+    rddLight.flatMap(row => {
+      val result = mutable.ListBuffer[(Int, (Int, (Int, Double)))]()
+      val keyVal = row._1
+      val joinVal = row._2._1
+      val weight = row._2._2
+      val part = keyVal % loc
+      for (i <- 0 until repeats) {
+        if (column) {
+          result += ((loc * i + part, (keyVal, (joinVal, weight))))
+        } else {
+          result += ((repeats * part + i, (keyVal, (joinVal, weight))))
+        }
+      }
+      result
+    })
+  }
 
   def main(argv: Array[String]) {
+    Configurator.setLevel("uwaterloo.mpcmm", Level.OFF)
+    Configurator.setLevel("org", Level.OFF)
+
     val args = new WorstCaseOptimalMatrixMultConf(argv)
-    logger.info("R1Path: " + args.R1Path())
-    logger.info("R2Path: " + args.R2Path())
+//    logger.info("R1Path: " + args.R1Path())
+//    logger.info("R2Path: " + args.R2Path())
 
     val conf = new SparkConf().setAppName("WorstCaseOptimalJoin")
     val sc = new SparkContext(conf)
@@ -155,12 +188,14 @@ object WorstCaseOptimalMatrixMult {
 
     val R1AHeavyDegree = R1Counted.filter(_._2 > L)
     val R1AHeavy = findWeightedRDD(sc, R1partitioned, R1AHeavyDegree)
+//    logger.info("R1AHeavy " + R1AHeavy.count())
     val R1ALightDegree = R1Counted.filter(_._2 <= L)
     val R1ALightCount = R1ALightDegree.size
     val R1ALight = findWeightedRDD(sc, R1partitioned, R1ALightDegree)
 
     val R2CHeavyDegree = R2Counted.filter(_._2 > L)
     val R2CHeavy = findWeightedRDD(sc, R2partitioned, R2CHeavyDegree)
+//    logger.info("R2CHeavy " + R2CHeavy.count())
     val R2CLightDegree = R2Counted.filter(_._2 <= L)
     val R2CLightCount = R2CLightDegree.size
     val R2CLight = findWeightedRDD(sc, R2partitioned, R2CLightDegree)
@@ -175,7 +210,7 @@ object WorstCaseOptimalMatrixMult {
     val AHeavyCLightServerCount = findServerCountHeavyLight(R1AHeavyDegree, R2CLightCount, L)
     val ALightCHeavyServerCount = findServerCountHeavyLight(R2CHeavyDegree, R1ALightCount, L)
 
-    val serverUsageHeavyHeavy = AHeavyCHeavyServerCount
+    val serverUsageHeavyHeavy = AHeavyCHeavyServerCount.toList
     var start = 0
     val serverAssignmentHeavyHeavy = serverUsageHeavyHeavy.map(row => {
         start += row._2
@@ -184,6 +219,11 @@ object WorstCaseOptimalMatrixMult {
     )
 
     val serverAssignmentAHeavy = serverAssignmentHeavyHeavy.map(row => (row._1._1, row._2))
+    val serverAssignmentCHeavy = serverAssignmentHeavyHeavy.map(row => (row._1._2, row._2))
+
+    val serverAssignmentAHeavyMap = serverAssignmentAHeavy.groupBy(_._1)
+    val serverAssignmentCHeavyMap = serverAssignmentCHeavy.groupBy(_._1)
+
     val serverAssignmentAHeavyCLight = AHeavyCLightServerCount.map(
       row => {
         start += row._2
@@ -191,7 +231,6 @@ object WorstCaseOptimalMatrixMult {
       }
     )
 
-    val serverAssignmentCHeavy = serverAssignmentHeavyHeavy.map(row => (row._1._2, row._2))
     val serverAssignmentALightCHeavy = ALightCHeavyServerCount.map(
       row => {
         start += row._2
@@ -199,8 +238,8 @@ object WorstCaseOptimalMatrixMult {
       }
     )
 
-    val serverAssignmentAHeavyBc = sc.broadcast(serverAssignmentAHeavy)
-    val serverAssignmentCHeavyBc = sc.broadcast(serverAssignmentCHeavy)
+    val serverAssignmentAHeavyBc = sc.broadcast(serverAssignmentAHeavyMap)
+    val serverAssignmentCHeavyBc = sc.broadcast(serverAssignmentCHeavyMap)
 
     val R1AHeavyAssigned = assignPartitionNumberToHeavy(R1AHeavy, serverAssignmentAHeavyBc)
     val R2CHeavyAssigned = assignPartitionNumberToHeavy(R2CHeavy, serverAssignmentCHeavyBc)
@@ -230,8 +269,8 @@ object WorstCaseOptimalMatrixMult {
 //    logger.info("k size:" + k)
 //    logger.info("l size:" + l)
 
-    val R1ALightwithPartition = dupLightForServers(sc, k, l, R1ALightDegree, R1ALight)
-    val R2CLightwithPartition = dupLightForServers(sc, l, k, R2CLightDegree, R2CLight)
+    val R1ALightwithPartition = dupLightForServersHashAssign(sc, k, l, true, R1ALightDegree, R1ALight)
+    val R2CLightwithPartition = dupLightForServersHashAssign(sc, l, k, false, R2CLightDegree, R2CLight)
 
     val lightLightJoinResult = R1ALightwithPartition.join(R2CLightwithPartition)
     val lightLightJoinResultValidated = lightLightJoinResult.filter(row => row._2._1._2._1 == row._2._2._2._1)
@@ -253,12 +292,12 @@ object WorstCaseOptimalMatrixMult {
     logger.info("result size: " + result.count())
     logger.info("join time in ms: " + timer.getElapsedTime())
 
-    reflect.io.File(args.resultFolder() + "/summary.txt")
+    reflect.io.File(args.resultFolder() + "/WorstCaseSummary.txt")
       .writeAll("result size: " + result.count() + "\n" + "join time in ms: " + timer.getElapsedTime())
 
 //    For testing result
 //    val resultSorted = result.sortBy(r => (r._1, r._2, r._3), numPartitions = 1)
-//    resultSorted.saveAsTextFile("result/WorstCaseMatMulSorted.txt")
+//    resultSorted.saveAsTextFile(args.resultFolder() + "/WorstCaseMatMulSorted.txt")
   }
 }
 
