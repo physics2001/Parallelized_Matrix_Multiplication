@@ -53,6 +53,8 @@ Now the main classes can be run without errors.
 The timer and recorded join time are incorrect. After starting the algorithm, please check the local endpoint for more details on the time each step takes in Spark. 
 In the `INFO` logs, Spark would say the address at which it opens a `Spark web UI`. Running on linux may allow checking history for each run. 
 
+Github also limits the maximum file sizes, so results with `N = 2000000` and `N = 40000000` were not uploaded.  
+
 ## References
 <an id="1">[1]</an>
 Xiao Hu and Ke Yi. 2020. Parallel Algorithms for Sparse Matrix Multiplication and Join-Aggregate Queries. 
