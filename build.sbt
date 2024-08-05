@@ -2,7 +2,7 @@ ThisBuild / version := "1.0.0"
 
 ThisBuild / scalaVersion := "2.13.14"
 
-assemblyJarName in assembly := "algorithm.jar"
+assemblyJarName in assembly := s"algorithm-${version.value}.jar"
 
 lazy val root = (project in file("."))
   .settings(
